@@ -1,0 +1,190 @@
+---
+title: "Analyzing the NYC Subway Dataset"
+output: html_document
+---
+##Instruction
+https://docs.google.com/document/d/16T3kirC0IxvtfxlZb7n5kOz5xFF_JTwrG31J2OZj8KM/pub?embedded=True
+
+##Report
+```{r,message=FALSE,echo=FALSE}
+library(ggplot2)
+library(knitr)
+library(plyr)
+
+##read in data frame
+df <- read.csv('/Users/ruiqiliu/Desktop/Udacity-DataAnalyst/P2_NYC.Subway/turnstile_data_master_with_weather.csv')
+df[,c(5,15,16,22)] <- lapply(df[,c(5,15,16,22)] ,as.factor)
+```
+I used the original data for the whole analysis.
+
+###Section 0. References
+https://en.wikipedia.org/wiki/Mann–Whitney_U_test#Assumptions_and_formal_statement_of_hypotheses
+http://stackoverflow.com/questions/22231124/how-to-draw-stacked-bars-in-ggplot2-that-show-percentages-based-on-group
+
+https://discussions.udacity.com/t/untangling-rain-effects-from-location-and-timing-at-aggregate-level/13416/3
+
+###Section 1. Statistical Test
+Before conducting any test,I plot the ridership distributions to find the best statistical test.
+According to the plot below, it is highly unlikely that the sample ridership data are drawn from 
+normal distributions.Therefore, in this analysis I choose to conduct independent 2-group Mann-Whitney U Test, which is largely applicable to unknown distributions.
+
+```{r,echo=FALSE}
+#Test difference in ridership during rain vs. no-rain
+##Distribution
+ggplot(df,aes(ENTRIESn_hourly,fill = rain)) + geom_histogram(binwidth = 100,color = 'black')+xlim(0,6000)+scale_fill_discrete(name="Wethear\nCondition",breaks=c("1", "0"),labels=c("Rain", "Not Rain"))
+```
+
+The Mann-Whitney U test assumes that "the distributions of both populations are equal".Formally,the null hypothesis is stated as: 
+P(Ridership when rain > Ridership when no rain) = P(Ridership when rain < Ridership when no rain)
+The alternative hypothesis is stated as "more people ride the subway when it is raining versus when it is not raining.", which corresponds to a one-sided test.
+
+```{r,echo=FALSE,message=FALSE,results='hide'}
+rain = df[which(df$rain == 1),]$ENTRIESn_hourly 
+not.rain = df[which(df$rain == 0),]$ENTRIESn_hourly
+
+#independent 2-group Mann-Whitney U Test
+wilcox.test(rain,not.rain,paired = FALSE,alternative = 'greater') 
+```
+
+I used 5% rejection area and the test results are shown below.
+.
+```{r,echo=FALSE}
+Statistic = c('U','p-value','mean for raining days','mean for non-raining days')
+Value = c(1949994921,0.02494,1105.446,1090.279)
+results = cbind(Statistic,Value)
+kable(results,format = 'markdown')
+```
+
+The small p-value indicates that there is a very low chance to observe such samples if the two are drawn from same population. Therefore, we can reject the null hypothesis. This test suggests that people ride the subway more when it is raining than when it is not raining.
+
+###Section 2. Linear Regression
+```{r,echo=FALSE,message=FALSE,results = 'hide'}
+#create factor variable day. It represents the day of the week.
+df$day = factor(weekdays(as.Date(df$DATEn,"%Y-%m-%d")))
+
+#create factor variable weekday. It indicates whether the day is weekday or weekend.
+weekdays1 <- c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday')
+df$weekday <- factor((df$day %in% weekdays1), levels=c(FALSE, TRUE), labels=c('weekend','weekday')) 
+```
+
+OLS using Statsmodels is applied here to estimate coefficients.
+Features I finally used in this model are: UNIT, Hour, mean temperatures underground("meantempi"), rain, ,weekday or weekend.
+
+####Building the model
+Considering the long tail of entries-per-hour's distribution, I took a logarithmic transformations. Since there are some zeros in the dataset and the values are generally large, I add each value by one and the take logarithm. 
+
+First of all, I added UNIT to the regression because intuitively location which represented by UNIT is the biggest influence on the volume of ridership.It generates a $R^2$ of 0.5194 which is a big boost to the prediction. 
+
+I then decided to add hours as factor variable, which is another big influnce on ridership.This helps boost $R^2$ to 0.6314.
+
+I created two new dummy variables,day and weekday, to represent the day of the week and wether the day is weekday respectively. These two variables are used to capture the variaties between each day.After adding on to the former model, I found that weekday performs better than day. So I included weekday in my model.
+
+Considering the fact that people tend to go underground once the outside is foggy or rainy, I added rain and fog to my model as well. It turns out both of them are significant and $R^2$ jumps to 0.6457.
+
+By trying and testing, I decided to exclude "meantempi" "meanpressurei" "maxdewpti" "mindewpti" "minpressuei""meanwindspdi" "maxtempi" in my model.Even though they do help increase $R^2$ a little bit and some of them are statistically significant, they do not help to increase aajusted $R^2$ and somehow render the model redundent and inefficient to calculate. 
+
+####Modification
+An interesting point I found from the above model is that raining is negatively correlated with ENTRIESn_hourly. One possible explaination for this is that people tend to ride subway more on weekdays than weekends, and it happened to rain more during weekdays than weekends. As a result, variable 'weekday' capture part of rain's effect in the regression, casusing the correlation between rain and ridership to be negative.
+
+```{r,echo =FALSE,fig.height=3,fig.width = 8,warning=FALSE}
+ggplot(df,aes(x = weekday, fill=rain)) +
+        geom_bar() +scale_fill_discrete(name="Wethear\nCondition",
+                            breaks=c("1", "0"),
+                            labels=c("Rain", "Not Rain")) + 
+        ggtitle("More rain on weekdays!")+
+        ylab("Percentage")+
+        coord_flip()
+```
+
+To resovle the interaction, I added an interaction term "weekday x rain". As expected, the correlation between rain and entries became positive again.Further more, I found a strong interaction between temprature and rain,which is reasonable because New York's weather is characterized by its subtropical monsoon climate - rain increases as temperature gets higher.Taking this effect into consideration, I add mean temperature and rain interaction term in the model.
+
+####Final result
+```{r,result='hide',echo=FALSE}
+fit <- lm(log(ENTRIESn_hourly+1) ~ UNIT  + Hour + rain + fog + weekday  + rain:weekday + meantempi:rain ,df)
+```
+
+The final model is therefore:
+log(ENTRIESn_hourly) ~ UNIT  + Hour + weekday + rain + fog + rain:weekday +meantempi:rain
+The finally $R^2$ is 0.6477 and associated ajusted $R^2$ is 0.6464, indicating my model helps explain 64.77% of ridership's varibility.The coefficient for meantempi when it is raining is -0.0250024 and is 0.0095423 when it is not raining.
+
+Based on this $R^2$, I would say that my model is appropriate to roughtly measure the ridership but not sufficient to accurately predict. As cdf of the relative errors shows, while 75% of predictions falls below 0.9, there is stil a long tail not acurately covered by my model.
+
+```{r,echo = FALSE,reulst='hide'}
+relativeError = abs(df$ENTRIESn_hourly - exp(fit$fitted))/(df$ENTRIESn_hourly +1)
+plot(ecdf(relativeError),main = "cdf of relative errors",xlab = 'relative error in digit',xlim=c(0,2))
+abline(v=.95,h=0.75)
+```
+
+
+
+###Section 3. Visualization
+####Histograms for raining vs. no raining
+First, plot original histogram of rainy day vs. no rainy day. Corresponding to Mann-Whitney U test result above, it seems like people ride subway more when it is raining.
+
+```{r,echo=FALSE,warning =FALSE}
+#Before correction
+ggplot(df,aes(ENTRIESn_hourly,fill = rain)) + 
+        geom_histogram(binwidth = 100,color = 'black')+
+        xlim(0,6000)+ 
+        scale_fill_discrete(name="Wethear\nCondition", breaks=c("1", "0"),labels=c("Rain", "Not Rain")) + ggtitle("Before Correction for other Effect\nRidership when it is raining vs.not raining")
+```
+
+However, as suggested by the regression analysis, other features such as UNIT and weahter also affect ridership. So I reduced the other features effect on entries per hour, and plot the rainy day entry vs. no-rainy day entry again.
+
+```{r,echo=FALSE}
+#reduce other effect
+m = lm(ENTRIESn_hourly ~ UNIT  + Hour  + fog + weekday  + rain:weekday + meantempi:rain,df)
+new_entries_hourly = residuals(m)
+
+#create new data frame
+df_new = data.frame(new_entries_hourly,df$rain)
+colnames(df_new) = c('new_entries_hourly','rain')
+
+
+#After correction plot
+ggplot(df_new,aes(new_entries_hourly,fill = rain)) + 
+        geom_histogram(binwidth = 100,color = 'black')+ 
+        xlim(0,6000)+ 
+        scale_fill_discrete(name="Wethear\nCondition",
+                            breaks=c("1", "0"),
+                            labels=c("Rain", "Not Rain")) + 
+        ggtitle("After Correction for other Effect\nRidership when it is raining vs.not
+                raining")
+```
+
+It is clear that people ride subway more when it is not raining.
+
+####histogram for weekdays vs. weekends
+```{r,echo=FALSE}
+ggplot(df,aes(ENTRIESn_hourly,fill = weekday)) + 
+        geom_histogram(binwidth = 100,color = 'black')+ 
+        xlim(0,5000)+
+        ggtitle("Ridership by day-of-week")
+```
+
+We can see that people ride more on weekdays
+
+####Visualization for Hours
+```{r,echo=FALSE}
+Hour.mean = ddply(df,'Hour',summarise,mean.entries.hourly = mean(ENTRIESn_hourly))
+
+##For line graphs, the data points must be grouped so that it knows which points to connect. In this case, it is simple -- all points should be connected, so group=1. When more variables are used and multiple lines are drawn, the grouping for lines is usually done by variable.
+
+ggplot(Hour.mean,aes(x=Hour,y=mean.entries.hourly,group=1))+
+        geom_point(color = 'red',size = 3)+
+        geom_line(color='black')+
+        ggtitle("Mean Ridership by hour of day")
+```
+
+
+###Section 4. Conclusion
+From both statistical test and linear regression, we can reach the conclusion that people tend to ride more when it is raining than when it is not raining.
+
+###Section 5. Reflection
+####Shortcomings of the methods 
+The varialbes we are using in this dataset is not complete enough to analyze ridership. First of all, one crucial element to predict the ridership volume is the STATION. One can easily predict that union square is busy all day while McDonald Ave may not have too many visits. If we can group data by station and track each of them individually. The result we would get should be more practically appliable.
+
+On the other hand, I do believe there are better method than regression in this analysis. Due to the multidimension of this dataset, it is hard to clear even a rough picture out of it. I think the PCA method mentioned in the class vedio would be very helpful. Unfortunally, I do not know how to implement it at this stage. But it is a greate incentive for my further learning.
+
+####Other insights
+I have noticed that the whole dataset was collected during May, when the climate is generally friendly and cozy. It is not surprising to find that people tend to go undergound when it is raining outside because except raining, there is not much difference between outside and inside. However, I am curious what would happen when climate goes more drastic, like hot summer or freezing winter. Would rain still affect ridership the same way?
